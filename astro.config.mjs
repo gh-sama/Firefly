@@ -55,6 +55,68 @@ import { remarkReadingTime } from "./src/plugins/remark-reading-time.mjs";
 import { remarkWikiLink } from "./src/plugins/remark-wiki-link.js";
 import { collectUsedFontCssVars } from "./src/utils/fontHelper";
 
+// ── jsDelivr 字体镜像（中国大陆网络）──────────────────────────────
+// Astro Fonts API 的 fontsource / npm 提供者会从 cdn.jsdelivr.net 下载 .woff2
+// 字体文件；该域名在部分网络环境下连接会被重置，导致启动即报
+//   [CannotFetchFontFile] ... (cause: fetch failed / ECONNRESET)
+// 这里仅在 Node 侧把 jsDelivr 请求依次改写到可用镜像后重试，其它请求不受影响。
+// 可用环境变量 JSDELIVR_MIRROR 指定镜像域名，例如：
+//   JSDELIVR_MIRROR=gcore.jsdelivr.net pnpm dev
+const JSDELIVR_HOST = "cdn.jsdelivr.net";
+const JSDELIVR_MIRRORS = process.env.JSDELIVR_MIRROR?.trim()
+	? [process.env.JSDELIVR_MIRROR.trim()]
+	: ["fastly.jsdelivr.net", "gcore.jsdelivr.net", JSDELIVR_HOST];
+
+function toFetchUrl(input) {
+	if (typeof input === "string") return new URL(input);
+	if (input instanceof URL) return new URL(input.href);
+	if (input && typeof input === "object" && typeof input.url === "string") {
+		return new URL(input.url);
+	}
+	return null;
+}
+
+const nativeFetch = globalThis.fetch.bind(globalThis);
+if (!globalThis.__JSDELIVR_MIRROR_PATCHED__) {
+	globalThis.__JSDELIVR_MIRROR_PATCHED__ = true;
+	let mirrorLogged = false;
+	globalThis.fetch = async (input, init) => {
+		let url;
+		try {
+			url = toFetchUrl(input);
+		} catch {
+			url = null;
+		}
+		if (!url || url.hostname !== JSDELIVR_HOST) {
+			return nativeFetch(input, init);
+		}
+		let lastError;
+		for (const host of JSDELIVR_MIRRORS) {
+			const target = new URL(url.href);
+			target.hostname = host;
+			const request =
+				typeof input === "string" || input instanceof URL
+					? target.href
+					: new Request(target.href, input);
+			const signal = AbortSignal.any([
+				AbortSignal.timeout(20_000),
+				...(init?.signal ? [init.signal] : []),
+			]);
+			try {
+				const response = await nativeFetch(request, { ...init, signal });
+				if (!mirrorLogged) {
+					mirrorLogged = true;
+					console.log(`[fonts] jsDelivr 请求已切换到镜像 ${host}`);
+				}
+				return response;
+			} catch (error) {
+				lastError = error;
+			}
+		}
+		throw lastError;
+	};
+}
+
 if (process.env.NODE_ENV === "development") {
 	setMaxListeners(20);
 }
